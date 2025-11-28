@@ -35,7 +35,7 @@ Set your instrumentation key:
 STELLAR_AI_INSTRUMENTATION_KEY="446e6a5e-a5ca-4c50-b311-e82648d987ef"
 ```
 
-If you use queues, enable queue mode:
+If you use queues, enable queue mode (default = true):
 
 ```env
 STELLAR_AI_USE_QUEUE=true
