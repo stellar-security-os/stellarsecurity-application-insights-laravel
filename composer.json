@@ -1,6 +1,6 @@
 {
   "name": "stellarsecurity/application-insights-laravel",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Stellar Security - Application Insights style telemetry for Laravel (HTTP, DB, jobs, mail, dependencies).",
   "type": "library",
   "license": "MIT",
