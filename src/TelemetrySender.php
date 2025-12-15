@@ -13,7 +13,7 @@ class TelemetrySender
 
     /**
      * Buffer limit before flushing telemetry.
-     * Keep it small to avoid losing events on short-lived processes.
+     * Use a sane default to reduce HTTP calls while avoiding data loss.
      */
     protected int $bufferLimit;
 
@@ -45,9 +45,9 @@ class TelemetrySender
         $batch = $this->buffer;
         $this->buffer = [];
 
+        // Queue is disabled by default to avoid silent data loss if workers are not running.
         $useQueue = (bool) config('stellar-ai.use_queue', false);
 
-        // If queue is enabled but no queue factory is available, fall back to direct send.
         if ($useQueue && $this->queue) {
             $this->queue->connection()->push(new SendTelemetryJob($batch));
             return;
@@ -61,24 +61,26 @@ class TelemetrySender
         $conn = (string) config('stellar-ai.connection_string', '');
         $ikey = (string) config('stellar-ai.instrumentation_key', '');
 
-        $resolved = $this->resolveConfig($conn, $ikey);
+        // Prefer connection string (modern App Insights). Fallback to instrumentation key.
+        [$endpoint, $resolvedIkey] = $this->resolveEndpointAndKey($conn, $ikey);
 
-        // If nothing is configured, drop silently.
-        if ($resolved === null) {
+        if ($resolvedIkey === '') {
+            // No telemetry configured, just drop.
+            // Note: Azure will drop telemetry without iKey anyway.
             return;
         }
-
-        [$endpoint, $instrumentationKey] = $resolved;
 
         $payload = [];
 
         foreach ($items as $item) {
-            // If the item already looks like a full AI envelope, just normalize.
+            // If the item is already a full AI envelope (RequestData / ExceptionData / etc),
+            // send it as-is (only ensure iKey and time are present).
             if (isset($item['data']['baseType'])) {
                 $envelope = $item;
 
+                // Ensure iKey and time.
                 if (empty($envelope['iKey'])) {
-                    $envelope['iKey'] = $instrumentationKey;
+                    $envelope['iKey'] = $resolvedIkey;
                 }
 
                 if (empty($envelope['time'])) {
@@ -89,11 +91,11 @@ class TelemetrySender
                 continue;
             }
 
-            // Otherwise, wrap as a simple custom event.
+            // Otherwise: wrap as a custom EventData (fallback).
             $payload[] = [
                 'time' => $item['time'] ?? gmdate('c'),
-                'name' => $item['name'] ?? 'Custom.Event',
-                'iKey' => $instrumentationKey,
+                'name' => 'Microsoft.ApplicationInsights.Event',
+                'iKey' => $resolvedIkey,
                 'data' => [
                     'baseType' => 'EventData',
                     'baseData' => [
@@ -114,24 +116,23 @@ class TelemetrySender
                 'json' => $payload,
             ]);
         } catch (\Throwable $e) {
-            // Telemetry must never break the app. Log locally at a low level.
+            // Telemetry must never break the application. Log locally at debug level.
             Log::debug('Application Insights telemetry send failed: ' . $e->getMessage());
         }
     }
 
     /**
-     * Resolve ingestion endpoint + instrumentation key from connection string and/or fallback key.
+     * Resolve ingestion endpoint and instrumentation key from connection string and/or fallback key.
      *
      * Returns:
      *  - [endpointUrl, instrumentationKey]
-     *  - null if nothing is configured
      */
-    protected function resolveConfig(string $connectionString, string $fallbackIkey): ?array
+    protected function resolveEndpointAndKey(string $connectionString, string $fallbackIkey): array
     {
         $ikey = trim($fallbackIkey);
         $ingestionEndpoint = null;
 
-        if ($connectionString !== '') {
+        if (trim($connectionString) !== '') {
             $parsed = $this->parseConnectionString($connectionString);
 
             if (!empty($parsed['InstrumentationKey'])) {
@@ -143,19 +144,15 @@ class TelemetrySender
             }
         }
 
-        if ($ikey === '') {
-            // Without an instrumentation key, Azure will drop telemetry.
-            return null;
-        }
-
-        // Default endpoint if none is provided in the connection string.
+        // Default endpoint if the connection string does not specify a regional endpoint.
         $base = $ingestionEndpoint ?: 'https://dc.services.visualstudio.com';
+        $endpoint = $base . '/v2/track';
 
-        return [$base . '/v2/track', $ikey];
+        return [$endpoint, $ikey];
     }
 
     /**
-     * Parse connection string segments like "Key=Value;Key2=Value2".
+     * Parse a connection string formatted like "Key=Value;Key2=Value2".
      */
     protected function parseConnectionString(string $connectionString): array
     {
@@ -163,6 +160,7 @@ class TelemetrySender
 
         foreach (explode(';', $connectionString) as $segment) {
             $segment = trim($segment);
+
             if ($segment === '' || !str_contains($segment, '=')) {
                 continue;
             }
