@@ -14,10 +14,27 @@ class HttpExtractor
 
     public static function url(Request $request): string
     {
-        // Only log the base URL without query parameters
-        return $request->url();
-    }
+        $baseUrl = $request->url();
 
+        if (! (bool) config('stellar-ai.include_query_params', false)) {
+            return $baseUrl;
+        }
+
+        $fullUrl = $request->fullUrl();
+        $queryString = parse_url($fullUrl, PHP_URL_QUERY);
+
+        if (! is_string($queryString) || $queryString === '') {
+            return $baseUrl;
+        }
+
+        $sanitizedQueryString = TelemetrySanitizer::sanitizeQueryString($queryString);
+
+        if ($sanitizedQueryString === '') {
+            return $baseUrl;
+        }
+
+        return $baseUrl . '?' . $sanitizedQueryString;
+    }
 
     public static function statusCode(Response $response): int
     {

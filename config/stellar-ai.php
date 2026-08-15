@@ -45,6 +45,9 @@ return [
     // Emit one trace per request so Azure Search shows activity (can increase volume).
     'trace_per_request' => env('STELLAR_AI_TRACE_PER_REQUEST', true),
 
+    // Include URL query parameters in request telemetry. Sensitive values are masked.
+    'include_query_params' => env('STELLAR_AI_INCLUDE_QUERY_PARAMS', false),
+
     // Application role name shown in Azure.
     'role_name' => env('STELLAR_AI_ROLE_NAME', env('APP_NAME', 'stellar-app')),
 

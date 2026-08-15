@@ -7,6 +7,8 @@ Built by https://stellarsecurity.com
 This package is designed to be safe by default:
 - Telemetry **must never** break your application
 - Queue sending is **disabled by default** to avoid silent data loss
+- URL query parameters are **disabled by default** to reduce accidental exposure of request data
+- Sensitive telemetry values are masked before they are sent
 - Connection String is the preferred configuration (modern App Insights)
 
 ## Requirements
@@ -22,7 +24,13 @@ composer require stellarsecurity/application-insights-laravel
 
 ## Configuration
 
-Publish the config (if your package provides a publish command). If not, create `config/stellar-ai.php` in your app.
+Publish the package config:
+
+```bash
+php artisan vendor:publish --tag=stellar-ai-config
+```
+
+Then configure the package through your `.env` file.
 
 ### Recommended: Connection String
 
@@ -44,6 +52,55 @@ STELLAR_AI_CONNECTION_STRING=InstrumentationKey=xxxx;IngestionEndpoint=https://w
 STELLAR_AI_INSTRUMENTATION_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
+## Query parameters in request URLs
+
+Query parameters are excluded from request telemetry by default.
+
+For example, this incoming request:
+
+```text
+https://example.com/api/orders?status=pending&page=2
+```
+
+is recorded as:
+
+```text
+https://example.com/api/orders
+```
+
+To include query parameters in Application Insights request URLs, enable:
+
+```env
+STELLAR_AI_INCLUDE_QUERY_PARAMS=true
+```
+
+After changing the value, rebuild Laravel's configuration cache:
+
+```bash
+php artisan config:clear
+php artisan config:cache
+```
+
+When enabled, non-sensitive query parameters are retained:
+
+```text
+https://example.com/api/orders?status=pending&page=2
+```
+
+Sensitive query parameter values are still masked before telemetry is sent. For example:
+
+```text
+https://example.com/api/reset?token=secret-value&page=2
+```
+
+is recorded with the token value removed:
+
+```text
+https://example.com/api/reset?token=%3Cremoved%3E&page=2
+```
+
+This behavior applies to the request URL used by the HTTP request telemetry path, including failed requests captured by the middleware.
+
 ## Example config (`config/stellar-ai.php`)
 
 ```php
@@ -62,12 +119,18 @@ return [
 
     'connection_string' => env(
         'STELLAR_AI_CONNECTION_STRING',
-        env('APPLICATIONINSIGHTS_CONNECTION_STRING', '')
+        env(
+            'APPLICATIONINSIGHTS_CONNECTION_STRING',
+            env('APPINSIGHTS_CONNECTION_STRING', '')
+        )
     ),
 
     'instrumentation_key' => env(
         'STELLAR_AI_INSTRUMENTATION_KEY',
-        env('APPINSIGHTS_INSTRUMENTATIONKEY', '')
+        env(
+            'APPINSIGHTS_INSTRUMENTATIONKEY',
+            env('APPINSIGHTS_INSTRUMENTATION_KEY', '')
+        )
     ),
 
     /*
@@ -84,6 +147,12 @@ return [
 
     // Flush telemetry automatically at the end of the request lifecycle.
     'auto_flush' => env('STELLAR_AI_AUTO_FLUSH', true),
+
+    // Emit one trace per request so Azure Search shows activity (can increase volume).
+    'trace_per_request' => env('STELLAR_AI_TRACE_PER_REQUEST', true),
+
+    // Include URL query parameters in request telemetry. Sensitive values are masked.
+    'include_query_params' => env('STELLAR_AI_INCLUDE_QUERY_PARAMS', false),
 
     // Application role name shown in Azure.
     'role_name' => env('STELLAR_AI_ROLE_NAME', env('APP_NAME', 'stellar-app')),
@@ -107,9 +176,10 @@ Then ensure a worker is running in production:
 php artisan queue:work
 ```
 
-If you enable queue mode without a running worker, telemetry will be delayed (and may appear missing).
+If you enable queue mode without a running worker, telemetry will be delayed and may appear missing.
 
 ## What is tracked
+
 Depending on your middleware/service wiring, the package can track:
 - HTTP requests
 - Exceptions
@@ -118,7 +188,7 @@ Depending on your middleware/service wiring, the package can track:
 
 ## Viewing data in Azure
 
-In Azure Portal → Application Insights → **Logs (Analytics)**, run:
+In Azure Portal -> Application Insights -> **Logs (Analytics)**, run:
 
 ```kusto
 union requests, traces, exceptions
@@ -132,12 +202,21 @@ requests
 | order by timestamp desc
 ```
 
+To inspect captured URLs and verify query parameters when enabled:
+
+```kusto
+requests
+| project timestamp, name, url, resultCode, success
+| order by timestamp desc
+```
+
 ## Common troubleshooting
 
 ### I see no data at all
+
 1. Confirm your app is using the **correct** Application Insights resource.
 2. Confirm a valid **instrumentation key** is resolved.
-    - If using a connection string, it must include `InstrumentationKey=...`
+   - If using a connection string, it must include `InstrumentationKey=...`.
 3. If queue mode is enabled, confirm workers are running.
 4. Clear and rebuild config cache after changing `.env`:
 
@@ -146,8 +225,27 @@ php artisan config:clear
 php artisan config:cache
 ```
 
-### Azure “Search” looks empty, but Logs has data
+### Query parameters are missing
+
+Query parameter capture is disabled by default. Enable it with:
+
+```env
+STELLAR_AI_INCLUDE_QUERY_PARAMS=true
+```
+
+Then rebuild the Laravel configuration cache:
+
+```bash
+php artisan config:clear
+php artisan config:cache
+```
+
+Sensitive query values remain masked even when query parameter capture is enabled.
+
+### Azure "Search" looks empty, but Logs has data
+
 This is usually a UI filtering issue. Use Logs (Analytics) queries to confirm ingestion.
 
 ## License
+
 MIT
