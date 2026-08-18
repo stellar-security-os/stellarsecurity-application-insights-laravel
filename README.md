@@ -8,13 +8,15 @@ This package is designed to be safe by default:
 - Telemetry **must never** break your application
 - Queue sending is **disabled by default** to avoid silent data loss
 - URL query parameters are **disabled by default** to reduce accidental exposure of request data
-- Sensitive telemetry values are masked before they are sent
+- Sensitive query parameter values are masked by default when query capture is enabled
+- Query parameter privacy behavior can be controlled with `.env` rules
+- Sensitive telemetry properties are masked before they are sent
 - Connection String is the preferred configuration (modern App Insights)
 
 ## Requirements
 - PHP >= 8.1
 - Laravel 10+ (also compatible with Laravel 11/12 when using matching illuminate components)
-- Guzzle 7.x
+- Guzzle 7.x or 8.x
 
 ## Installation
 
@@ -74,48 +76,185 @@ To include query parameters in Application Insights request URLs, enable:
 STELLAR_AI_INCLUDE_QUERY_PARAMS=true
 ```
 
-After changing the value, rebuild Laravel's configuration cache:
+After changing telemetry configuration, rebuild Laravel's configuration cache:
 
 ```bash
 php artisan config:clear
 php artisan config:cache
 ```
 
-When enabled, non-sensitive query parameters are retained:
+### Query parameter privacy rules
 
-```text
-https://example.com/api/orders?status=pending&page=2
+When query parameter capture is enabled, each parameter can have its own JSON rule.
+
+`STELLAR_AI_QUERY_PARAM_RULES` is a JSON object where each key is a parameter name or wildcard pattern and each value describes what should happen to that parameter:
+
+```env
+STELLAR_AI_QUERY_PARAM_RULES='{"token":{"action":"mask"},"email":{"action":"mask"},"customer_id":{"action":"show_last","characters":4},"reference":{"action":"show_first","characters":6},"utm_*":{"action":"keep"},"debug":{"action":"drop"}}'
 ```
 
-Sensitive query parameter values are still masked before telemetry is sent. For example:
+The same value formatted as JSON is:
 
-```text
-https://example.com/api/reset?token=secret-value&page=2
+```json
+{
+  "token": {
+    "action": "mask"
+  },
+  "email": {
+    "action": "mask"
+  },
+  "customer_id": {
+    "action": "show_last",
+    "characters": 4
+  },
+  "reference": {
+    "action": "show_first",
+    "characters": 6
+  },
+  "utm_*": {
+    "action": "keep"
+  },
+  "debug": {
+    "action": "drop"
+  }
+}
 ```
 
-is recorded with the token value removed:
+Parameter matching is case-insensitive and supports `*` and `?` wildcards.
+
+Supported actions:
+
+| Action | Behavior |
+|---|---|
+| `keep` | Keep the original parameter value |
+| `mask` | Replace the complete value with the configured mask marker |
+| `drop` | Remove the parameter completely from the telemetry URL |
+| `show_first` | Keep the first `characters` characters and mask the rest |
+| `show_last` | Mask the beginning and keep the last `characters` characters |
+
+`show_first` and `show_last` require a non-negative integer `characters` value.
+
+Example request:
 
 ```text
-https://example.com/api/reset?token=%3Cremoved%3E&page=2
+https://example.com/api/orders?token=super-secret&customer_id=12345678&reference=ABCDEFGH&utm_source=google&debug=1
 ```
 
-This behavior applies to the request URL used by the HTTP request telemetry path, including failed requests captured by the middleware.
+With:
+
+```env
+STELLAR_AI_INCLUDE_QUERY_PARAMS=true
+STELLAR_AI_QUERY_PARAM_RULES='{"token":{"action":"mask"},"customer_id":{"action":"show_last","characters":4},"reference":{"action":"show_first","characters":6},"utm_*":{"action":"keep"},"debug":{"action":"drop"}}'
+```
+
+it is recorded as the equivalent of:
+
+```text
+https://example.com/api/orders?token=<removed>&customer_id=<removed>5678&reference=ABCDEF<removed>&utm_source=google
+```
+
+The mask marker is URL-encoded in the actual telemetry URL.
+
+### Per-rule mask markers
+
+A rule can override the global mask marker. This is useful when different parameters need different masking formats:
+
+```env
+STELLAR_AI_QUERY_PARAM_RULES='{"phone":{"action":"show_last","characters":4,"mask":"***"},"token":{"action":"mask","mask":"[redacted]"}}'
+```
+
+If a rule does not define `mask`, the package uses `STELLAR_AI_QUERY_PARAM_MASK`.
+
+### Built-in sensitive rules
+
+For backward compatibility and secure defaults, the package still masks parameter names containing sensitive fragments such as `password`, `token`, `authorization`, `auth`, `api_key`, `secret`, `email`, `username`, `ip`, `ip_address`, `user_agent`, and `wipe_token`.
+
+Built-in rules are applied only when no custom rule matched. This means custom JSON rules can deliberately override them:
+
+```env
+STELLAR_AI_QUERY_PARAM_RULES='{"email":{"action":"keep"},"access_token":{"action":"show_last","characters":4}}'
+```
+
+To disable the built-in query parameter rules completely:
+
+```env
+STELLAR_AI_QUERY_PARAM_USE_BUILTIN_SENSITIVE_RULES=false
+```
+
+This setting only changes query parameter handling. The package's general telemetry-property sanitization remains protected by its built-in sensitive-key behavior.
+
+### Default action for unmatched parameters
+
+By default, unmatched non-sensitive query parameters are kept, preserving the package's previous behavior:
+
+```env
+STELLAR_AI_QUERY_PARAM_DEFAULT_ACTION=keep
+```
+
+The default action supports `keep`, `mask`, or `drop`. Partial masking belongs in a parameter-specific JSON rule because it requires a `characters` value.
+
+A strict allowlist-style policy can mask everything except explicitly approved parameters:
+
+```env
+STELLAR_AI_INCLUDE_QUERY_PARAMS=true
+STELLAR_AI_QUERY_PARAM_USE_BUILTIN_SENSITIVE_RULES=false
+STELLAR_AI_QUERY_PARAM_DEFAULT_ACTION=mask
+STELLAR_AI_QUERY_PARAM_RULES='{"page":{"action":"keep"},"status":{"action":"keep"},"order_id":{"action":"show_last","characters":4},"utm_*":{"action":"keep"}}'
+```
+
+This is the recommended configuration when you want explicit control over every query parameter that may appear in telemetry.
+
+### Overlapping wildcard rules
+
+For most installations, the JSON object format above is the simplest option. Rules are evaluated in their decoded order and the first matching rule wins.
+
+If overlapping wildcard precedence must be explicit, an ordered JSON list is also accepted:
+
+```env
+STELLAR_AI_QUERY_PARAM_RULES='[{"parameter":"utm_secret_*","action":"mask"},{"parameter":"utm_*","action":"keep"}]'
+```
+
+Each list item uses `parameter` as the name/pattern plus the same `action`, `characters`, and optional `mask` fields.
+
+### Custom global mask marker
+
+The default mask marker is `<removed>`:
+
+```env
+STELLAR_AI_QUERY_PARAM_MASK="<removed>"
+```
+
+It can be changed, for example:
+
+```env
+STELLAR_AI_QUERY_PARAM_MASK="***"
+```
+
+A complete example:
+
+```env
+STELLAR_AI_INCLUDE_QUERY_PARAMS=true
+STELLAR_AI_QUERY_PARAM_RULES='{"token":{"action":"mask"},"session_*":{"action":"mask"},"customer_id":{"action":"show_last","characters":4},"reference":{"action":"show_first","characters":6},"utm_*":{"action":"keep"},"debug":{"action":"drop"}}'
+STELLAR_AI_QUERY_PARAM_USE_BUILTIN_SENSITIVE_RULES=true
+STELLAR_AI_QUERY_PARAM_DEFAULT_ACTION=keep
+STELLAR_AI_QUERY_PARAM_MASK="<removed>"
+```
+
+Invalid JSON fails closed: query parameter values are masked instead of being exposed. An explicitly matched rule with an invalid action or invalid `characters` value also fails closed to full masking. An invalid default action fails closed to `mask`.
 
 ## Example config (`config/stellar-ai.php`)
 
 ```php
 <?php
 
-return [
+$queryParamRulesJson = trim((string) env('STELLAR_AI_QUERY_PARAM_RULES', '{}'));
+$queryParamRules = json_decode($queryParamRulesJson === '' ? '{}' : $queryParamRulesJson, true);
 
-    /*
-    |--------------------------------------------------------------------------
-    | Application Insights configuration
-    |--------------------------------------------------------------------------
-    |
-    | Prefer connection string. Fallback to instrumentation key if needed.
-    |
-    */
+if (! is_array($queryParamRules)) {
+    $queryParamRules = null;
+}
+
+return [
 
     'connection_string' => env(
         'STELLAR_AI_CONNECTION_STRING',
@@ -133,28 +272,20 @@ return [
         )
     ),
 
-    /*
-    |--------------------------------------------------------------------------
-    | Telemetry behavior
-    |--------------------------------------------------------------------------
-    */
-
-    // Queue is disabled by default to avoid silent data loss when workers are not running.
     'use_queue' => env('STELLAR_AI_USE_QUEUE', false),
-
-    // Buffer limit before flush (helps reduce HTTP calls).
     'buffer_limit' => (int) env('STELLAR_AI_BUFFER_LIMIT', 10),
-
-    // Flush telemetry automatically at the end of the request lifecycle.
     'auto_flush' => env('STELLAR_AI_AUTO_FLUSH', true),
-
-    // Emit one trace per request so Azure Search shows activity (can increase volume).
     'trace_per_request' => env('STELLAR_AI_TRACE_PER_REQUEST', true),
 
-    // Include URL query parameters in request telemetry. Sensitive values are masked.
     'include_query_params' => env('STELLAR_AI_INCLUDE_QUERY_PARAMS', false),
+    'query_param_rules' => $queryParamRules,
+    'query_param_use_builtin_sensitive_rules' => env(
+        'STELLAR_AI_QUERY_PARAM_USE_BUILTIN_SENSITIVE_RULES',
+        true
+    ),
+    'query_param_default_action' => env('STELLAR_AI_QUERY_PARAM_DEFAULT_ACTION', 'keep'),
+    'query_param_mask' => env('STELLAR_AI_QUERY_PARAM_MASK', '<removed>'),
 
-    // Application role name shown in Azure.
     'role_name' => env('STELLAR_AI_ROLE_NAME', env('APP_NAME', 'stellar-app')),
 
 ];
@@ -202,7 +333,7 @@ requests
 | order by timestamp desc
 ```
 
-To inspect captured URLs and verify query parameters when enabled:
+To inspect captured URLs and verify query parameter handling when enabled:
 
 ```kusto
 requests
@@ -240,11 +371,36 @@ php artisan config:clear
 php artisan config:cache
 ```
 
-Sensitive query values remain masked even when query parameter capture is enabled.
+### A query parameter is unexpectedly masked
+
+Check these settings in this order:
+
+1. `STELLAR_AI_QUERY_PARAM_RULES` - first matching custom rule wins.
+2. `STELLAR_AI_QUERY_PARAM_USE_BUILTIN_SENSITIVE_RULES` - built-in sensitive-name protection runs after custom rules.
+3. `STELLAR_AI_QUERY_PARAM_DEFAULT_ACTION` - applies when nothing else matched.
+
+After editing `.env`, rebuild the Laravel configuration cache.
 
 ### Azure "Search" looks empty, but Logs has data
 
 This is usually a UI filtering issue. Use Logs (Analytics) queries to confirm ingestion.
+
+## Local verification
+
+After installing dependencies, you can run the package's query-rule smoke test directly:
+
+```bash
+composer install
+php tests/query_param_rules_smoke.php
+```
+
+There is no separate package build step. In a Laravel application, publish the configuration and rebuild Laravel's configuration cache after changing `.env` values:
+
+```bash
+php artisan vendor:publish --tag=stellar-ai-config
+php artisan config:clear
+php artisan config:cache
+```
 
 ## License
 
